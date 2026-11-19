@@ -92,6 +92,8 @@ jobs:
           ./gradlew apk --no-daemon -PnxApp=peanuts -PnxAppId=${{ inputs.app_id }} -PnxLabel="Peanuts test" \
             -PnxGames="$GAMES" -PnxPackStage="$RUNNER_TEMP/od/stage"
           ls -la out
+          # the signer's SHA-256: the same on every run when TEST_KEYSTORE_B64 is set (then a new APK installs over the last one)
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs out/*.apk | grep -E "DN|SHA-256" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
