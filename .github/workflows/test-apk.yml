@@ -83,7 +83,8 @@ jobs:
         env:
           KS: ${{ secrets.TEST_KEYSTORE_B64 }}
         run: |
-          if [ -n "$KS" ]; then mkdir -p ~/.android && echo "$KS" | base64 -d > ~/.android/debug.keystore && echo "using TEST_KEYSTORE_B64"; else echo "no TEST_KEYSTORE_B64: a new debug key"; fi
+          # the APK step re-signs with it (apksigner), whatever debug key Gradle picked
+          if [ -n "$KS" ]; then echo "$KS" | base64 -d > "$RUNNER_TEMP/test.keystore" && echo "using TEST_KEYSTORE_B64"; else echo "no TEST_KEYSTORE_B64: a new debug key"; fi
 
       - name: APK
         working-directory: android/app
@@ -92,6 +93,13 @@ jobs:
           ./gradlew apk --no-daemon -PnxApp=peanuts -PnxAppId=${{ inputs.app_id }} -PnxLabel="Peanuts test" \
             -PnxGames="$GAMES" -PnxPackStage="$RUNNER_TEMP/od/stage"
           ls -la out
+          if [ -f "$RUNNER_TEMP/test.keystore" ]; then
+            for a in out/*.apk; do
+              "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$RUNNER_TEMP/test.keystore" --ks-pass pass:android \
+                --ks-key-alias androiddebugkey --key-pass pass:android "$a"
+            done
+            rm -f "$RUNNER_TEMP/test.keystore"
+          fi
           # the signer's SHA-256: the same on every run when TEST_KEYSTORE_B64 is set (then a new APK installs over the last one)
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs out/*.apk | grep -E "DN|SHA-256" | tee -a "$GITHUB_STEP_SUMMARY"
 
