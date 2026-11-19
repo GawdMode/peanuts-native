@@ -1,0 +1,100 @@
+# PEANUTS: builds a "Peanuts test" APK (dev.nxnative.android.peanutstest) with the games you name, on a GitHub-hosted Linux runner, so no build tools
+# are needed on your own PC. The APK carries the real on-device packer (peanuts/scripts/ondevice-stage.sh), so Build in the app imports, rewrites and
+# translates the game on the phone itself. Nothing from any game is involved here: the APK holds code and the named games' profiles only.
+#
+# Run it from the Actions tab (Run workflow), then download the "peanuts-test-apk" artifact.
+# Optional secret TEST_KEYSTORE_B64: a base64 debug keystore (alias androiddebugkey, password android), so every run signs with the same key and a new
+# test APK installs over the last one without uninstalling it (which would delete the test app's saves). Without it each run gets a new key.
+name: test-apk
+
+on:
+  workflow_dispatch:
+    inputs:
+      games:
+        description: 'Title IDs, comma-separated (each needs dm/games/<id>/game.tsv)'
+        default: '0100F43008C44000'
+        required: true
+      app_id:
+        description: 'App id suffix (dev.nxnative.android.<suffix>), lower-case letters and digits'
+        default: 'peanutstest'
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      NDK_VERSION: 28.2.13676358
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0   # build.gradle asks git for the commit (BuildConfig.NX_COMMIT)
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'   # the shader translator (NativeAOT, linux-bionic-arm64)
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'   # the Gradle wrapper (8.14) does not run on newer JDKs
+
+      - name: Host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zsh ninja-build cmake spirv-tools
+          python -m pip install --upgrade pip
+          python -m pip install 'capstone>=5,<6' lz4 zbic==1.0.1.post1 fonttools
+
+      - name: Android SDK packages
+        run: |
+          SDKM=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
+          yes | "$SDKM" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
+          "$SDKM" --sdk_root="$ANDROID_HOME" "platforms;android-36" "build-tools;36.0.0" "ndk;$NDK_VERSION" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "sdk.dir=$ANDROID_HOME" > android/app/local.properties
+
+      - name: Cache the on-device packer stage
+        id: stage
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/od/stage
+          key: od-stage-${{ hashFiles('android/ondevice/**', 'dm/gfx/tools/dmsh_xlate_android/**', 'dm/third_party/zstd-zbic/**', 'dm/peanuts/pack_worker/**', 'dm/gfx/tools/cra_unscramble.c', 'dm/gfx/tools/dmsh_*', 'dm/gfx/tools/xlate_tree.py') }}
+
+      - name: On-device packer stage
+        if: steps.stage.outputs.cache-hit != 'true'
+        run: |
+          export MSBuildEnableWorkloadResolver=false
+          zsh peanuts/scripts/ondevice-stage.sh "$RUNNER_TEMP/od" || { tail -50 "$RUNNER_TEMP"/od/*.log 2>/dev/null; exit 1; }
+
+      - name: Signing key
+        env:
+          KS: ${{ secrets.TEST_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS" ]; then mkdir -p ~/.android && echo "$KS" | base64 -d > ~/.android/debug.keystore && echo "using TEST_KEYSTORE_B64"; else echo "no TEST_KEYSTORE_B64: a new debug key"; fi
+
+      - name: APK
+        working-directory: android/app
+        run: |
+          GAMES=$(echo "${{ inputs.games }}" | tr -d ' ')
+          ./gradlew apk --no-daemon -PnxApp=peanuts -PnxAppId=${{ inputs.app_id }} -PnxLabel="Peanuts test" \
+            -PnxGames="$GAMES" -PnxPackStage="$RUNNER_TEMP/od/stage"
+          ls -la out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: peanuts-test-apk
+          path: android/app/out/*.apk
+          retention-days: 14
